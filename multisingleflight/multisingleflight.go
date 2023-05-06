@@ -56,7 +56,6 @@ type call struct {
 	// and are only read after the WaitGroup is done.
 	val interface{}
 	err error
-	key string
 
 	// These fields are read and written with the singleflight
 	// mutex held before the WaitGroup is done, and are read but
@@ -91,36 +90,39 @@ func (g *Group) Do(keys []string, fn func(keys []string) map[string]*Result) map
 		g.m = make(map[string]*call)
 	}
 
-	//var newCall *call
-	callMap := make(map[*call]struct{})
+	callMap := make(map[string]*call)
 	left := make([]string, 0, len(keys))
 
 	for _, key := range keys {
 		if c, ok := g.m[key]; ok {
+			// 已经有协程在处理key了
 			c.dups++
-			callMap[c] = struct{}{}
+			callMap[key] = c
 		} else {
-			newCall := &call{key: key}
+			// 当前没有协程在处理key, 我们来处理
+			newCall := new(call)
 			newCall.wg.Add(1)
 			g.m[key] = newCall
 			left = append(left, key)
-			callMap[newCall] = struct{}{}
+			callMap[key] = newCall
 		}
 	}
 	g.mu.Unlock()
 
 	resultMap := make(map[string]*Result)
 	if len(left) != 0 {
+		// 处理我们应当处理的key
 		g.doCall(left, fn)
 	}
-	for c := range callMap {
+	// 等待获取每一个key的数据
+	for key, c := range callMap {
 		c.wg.Wait()
 		if e, ok := c.err.(*panicError); ok {
 			panic(e)
 		} else if c.err == errGoexit {
 			runtime.Goexit()
 		}
-		resultMap[c.key] = &Result{Val: c.val, Err: c.err, Shared: c.dups > 0}
+		resultMap[key] = &Result{Val: c.val, Err: c.err, Shared: c.dups > 0}
 	}
 
 	//fmt.Println(len(keys), len(resultMap), keys, resultMap)
@@ -139,19 +141,21 @@ func (g *Group) DoChan(keys []string, fn func([]string) map[string]*Result) <-ch
 		g.m = make(map[string]*call)
 	}
 
-	callMap := make(map[*call]struct{})
+	callMap := make(map[string]*call)
 	left := make([]string, 0, len(keys))
 
 	for _, key := range keys {
 		if c, ok := g.m[key]; ok {
+			// 已经有协程在处理key了
 			c.dups++
-			callMap[c] = struct{}{}
+			callMap[key] = c
 		} else {
-			newCall := &call{key: key}
+			// 当前没有协程在处理key, 我们来处理
+			newCall := new(call)
 			newCall.wg.Add(1)
 			g.m[key] = newCall
 			left = append(left, key)
-			callMap[newCall] = struct{}{}
+			callMap[key] = newCall
 		}
 	}
 	g.mu.Unlock()
@@ -159,16 +163,18 @@ func (g *Group) DoChan(keys []string, fn func([]string) map[string]*Result) <-ch
 	go func() {
 		resultMap := make(map[string]*Result)
 		if len(left) != 0 {
+			// 处理我们应当处理的key
 			g.doCall(left, fn)
 		}
-		for c := range callMap {
+		// 等待获取每一个key的数据
+		for key, c := range callMap {
 			c.wg.Wait()
 			if e, ok := c.err.(*panicError); ok {
 				panic(e)
 			} else if c.err == errGoexit {
 				runtime.Goexit()
 			}
-			resultMap[c.key] = &Result{Val: c.val, Err: c.err, Shared: c.dups > 0}
+			resultMap[key] = &Result{Val: c.val, Err: c.err, Shared: c.dups > 0}
 		}
 		ch <- resultMap
 	}()
